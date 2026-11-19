@@ -1,5 +1,3 @@
-using System.Security.Policy;
-
 namespace WinNTC1750;
 
 sealed partial class frmMain : Form
@@ -81,7 +79,7 @@ sealed partial class frmMain : Form
             lblSpeed.Text = $"Speed: {_speed + $" {(_useMetrics ? "km/h" : "miles/h")}"}.";
             lblIncline.Text = $"Incline: {_incline + " degrees"}.";
             lblDistance.Text = $"Distance: {(board.Status() == Board.STATUS.UNKNOWN ? "?" : _distance + $" {(_useMetrics ? "meters" : "miles")}")} .";
-            lblStatus.Text = (board.Status() == Board.STATUS.ERROR ? board.lastErrorMsg() : $"{board.Status().ToString()}."); 
+            lblStatus.Text = (board.Status() == Board.STATUS.ERROR ? board.LastErrorMsg() : $"{board.Status().ToString()}."); 
             btnStart.BackColor = Color.LightGreen;
             btnStop.BackColor = Color.Firebrick;
         }
@@ -118,38 +116,20 @@ sealed partial class frmMain : Form
                         Thread.Sleep(1000); // Waits 1sec only to allow enough time for the USB device to be plugged in
                         break;
                     
-                    case Board.STATUS.CONNECTING: 
-                        break; 
-                    
                     case Board.STATUS.HANDSHAKING:
                         board.Handshake();
                         break;
                     
-                    case Board.STATUS.CONNECTED: 
-                        switch (board.Mode())
-                        {
-                            case Board.MODE.UNKNOWN:
-                                break;
-                            case Board.MODE.IDLE:
-                                break;
-                            case Board.MODE.RUNNING:
-                                break;
-                            case Board.MODE.PAUSE:
-                                break;
-                            case Board.MODE.RESULTS:
-                                break;
-                            case Board.MODE.DMK:
-                                break;
-                            case Board.MODE.WARM_UP:
-                                break;
-                            case Board.MODE.COOL_DOWN:
-                                break;
-                            case Board.MODE.RESUME:
-                                break;
-                        }
-                        break; 
+                    case Board.STATUS.DISCONNECTING:
+                        //TODO?
                     
+                    case Board.STATUS.CONNECTED:
+                        board.ReadAllRegisters();
+                        break; 
+
                     case Board.STATUS.ERROR:
+                        //Clean all buffers before disconecting
+                        board.Dispose();
                         break;
                 };
         

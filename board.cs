@@ -8,37 +8,40 @@ sealed class Board : IDisposable
 {
     private string moduleName = "board.cs";
 
-    private const int VID = 0x213C; //ICON Health & Fitness (Rebranded as iFit Health & Fitness)
-    private const int PID = 0x0002; //ICON Generic HID (Good Wolf Universal ZH0058)
-    //private const int REPORT_SIZE = 64; //Jornal size for this device
+    private const int VID = 0x213C;                     // ICON Health & Fitness (Rebranded as iFit Health & Fitness).
+    private const int PID = 0x0002;                     // ICON Generic HID (Good Wolf Universal ZH0058).
 
-    private const int READ_TIMEOUT = 500; //Timeout on Read operations (Default 500ms)
-    private const int WRITE_TIMEOUT = 500; //Timeout on Write operations (Default 500ms)
-    private int  MAX_READING_RETRIES = 6;
-    
-    private HidDevice _device = null!;
-    private HidStream _hidStream = null!;
-    private STATUS _status = STATUS.UNKNOWN;
-    private MODE _mode = MODE.UNKNOWN;
-    private int _outLen = 0; //Size (informed by the HID) of the outcoming report
-    private int _inLen = 0; //Size (reported by the HID) of the incoming report
-    private Boolean _keepTryingSiently = false;
-    private string _lastErrorStatus = "";
-    
-    private byte[] _deviceInfo = new byte[0];
-    private byte[] _supportedDevices = new byte[0];
-    private byte[] _suportedComands = new byte[0];
-    private byte[] _systemInfo = new byte[0];
-    private byte[] _versionInfo = new byte[0];
-    private byte[] _securityInfo  = new byte[0];
+    private const int READ_TIMEOUT = 500;               // Timeout on Read operations (Default 500ms).
+    private const int WRITE_TIMEOUT = 500;              // Timeout on Write operations (Default 500ms).
 
+    private const byte REPORT_ID = 0;                   // ReportID will be 0 on both outReports and inReports.
+    private const byte STATUS_OK = 2;                   // Value (from STATUS byte) (from STATUS byte of an inReport) that indicates OK.
+    private const byte STATUS_LOCKED = 8;               // Value (from STATUS byte of an inReport) that indicates we need to perform the challenge again.
+    
+    private HidDevice _device = null!;                  // The HID Device. 
+    private HidStream _hidStream = null!;               // The read/write stream of the HID Device.
+    private STATUS _status = STATUS.UNKNOWN;            // The default STATUS of the HID Device.
+    private MODE _mode = MODE.UNKNOWN;                  // The default MODE of the treadmill's belt.
+    private KEYS _lastKeyCode = 0;  
+    private int _outReportSize = 0;                     // Size of the outcoming report (reported by the HID after open). 
+    private int _inReportSize = 0;                      // Size of the incoming report (reported by the HID after open).
+    private bool _keepTryingSiently = false;            // Indicate that we should wait for a HID Device connection silently (no logs or UI).
+    private string _lastErrorStatus = "";               // Stores the last error (so we can show them on the UI).
+    
     private int _softwareVersion = 0;
     private uint _serialNumber = 0;
     private uint _model = 0;
     private uint _partNumber = 0;
     private int _masterLibraryVersion = 0;
     
+    private int _minSpeed = 1;    // km/h    //TODO: Read from board
+    private int _maxSpeed = 15;   // km/h    //TODO: Read from board
+    private int _minGrade = -3;   //degrees  //TODO: Read from board
+    private int _maxGrade = 12;   //degrees  //TODO: Read from board
     
+    private string _extra_log_info = "";
+    private bool _quietLogging = false;
+
     public enum COMMAND : byte
     {
         NONE                    =   0,      // NOT USED
@@ -90,7 +93,7 @@ sealed class Board : IDisposable
         WORKOUT_CONTROL	   = 81   
     }
 
-    public enum REGISTER : byte
+    public enum REGISTER : int
     {
         KPH                      =   0,  // SpeedConverter           ReadOnly: false     - Target speed, hundredths (160 = 1.60 km/h). The ONLY usable speed value on this board since REG_ACTUAL_KPH returns always 0
         GRADE                    =   1,  // GradeConverter           ReadOnly: false     - Target incline, hundredths (1000 = 10.00 %)
@@ -132,7 +135,7 @@ sealed class Board : IDisposable
         LAST_NAME                =  39,  // StringConverter          ReadOnly: false  
         USER_NAME                =  40,  // StringConverter          ReadOnly: false  
         HEIGHT                   =  41,  // ShortConverter           ReadOnly: false  
-        MAX_RESISTANCE_LEVEL     =  42,  // ByteConverter            ReadOnly: true   
+        MAX_RESISTANCE_LEVEL     =  42,  // ByteConverter            ReadOnly: true    
         MAX_WEIGHT               =  43,  // DoubleConverter          ReadOnly: true   
         WARMUP_DISTANCE          =  44,  // IntConverter             ReadOnly: true   
         WARMUP_TIME              =  45,  // ShortConverter           ReadOnly: true   
@@ -196,15 +199,14 @@ sealed class Board : IDisposable
     public enum STATUS : byte
     {
         UNKNOWN       = 0,   // When the app starts, indicates that some checking needs to be tone to see the board status
-        DISCONNECTED  = 1,   // Board is not connected
-        CONNECTING    = 2,   // Trying to connect to the board
-        HANDSHAKING   = 3,   // Board needs the handshake (including the 32 bit challenge)
-        CONNECTED     = 4,   // Board is connected
-        DISCONNECTING = 5,    // Requested Board disconnection
-        ERROR         = 6    // Got some answer thar indicates that we sent wrong data.
+        HANDSHAKING   = 1,   // Board needs the handshake (including the 32 bit challenge)
+        CONNECTED     = 2,   // Board is connected
+        DISCONNECTING = 3,    // Requested Board disconnection
+        DISCONNECTED  = 4,   // Board is not connected
+        ERROR         = 5    // Got some answer thar indicates that we sent wrong data.
     }
 
-    public enum MODE : byte
+    public enum MODE : int
     {
         UNKNOWN         =  0,   //When the app started, indicates some check needs to be done to see the belt status
         IDLE            =  1,   //Machine waits for user's input
@@ -226,41 +228,42 @@ sealed class Board : IDisposable
 
     public enum KEYS : byte
     {
-        KEY_NONE                = 0x00,
-        KEY_EMERGENCY           = 0x00,  //NOT USED 
-        KEY_START               = 0x02,
-        KEY_STOP                = 0x01,
-        KEY_INCLINE_UP          = 0x05,
-        KEY_INCLINE_DOWN        = 0x06,
-        KEY_SPEED_UP            = 0x03,
-        KEY_SPEED_DOWN          = 0x04,
-        KEY_FAN_UP              = 0x32,
-        KEY_FAN_DOWN            = 0x33,
-        KEY_GRADE_12            = 0x00, 
-        KEY_GRADE_10            = 0x00, 
-        KEY_GRADE_08            = 0x00,
-        KEY_GRADE_06            = 0x00,
-        KEY_GRADE_05            = 0x00,
-        KEY_GRADE_04            = 0x00,
-        KEY_GRADE_03            = 0x00,
-        KEY_GRADE_02            = 0x00,
-        KEY_GRADE_01            = 0x00,
-        KEY_GRADE_00            = 0x00,
-        KEY_GRADE_01_NEG        = 0x00,
-        KEY_GRADE_02_NEG        = 0x00,
-        KEY_GRADE_03_NEG        = 0x00,
-        KEY_SPEED_12            = 0x00,
-        KEY_SPEED_11            = 0x00,
-        KEY_SPEED_10            = 0x00,        
-        KEY_SPEED_09            = 0x00,        
-        KEY_SPEED_08            = 0x00,
-        KEY_SPEED_07            = 0x00,
-        KEY_SPEED_06            = 0x00,
-        KEY_SPEED_05            = 0x00,
-        KEY_SPEED_04            = 0x00,
-        KEY_SPEED_03            = 0x00,
-        KEY_SPEED_02            = 0x00,
-        KEY_SPEED_01            = 0x00
+        NONE         = 0,
+        STOP         = 1,
+        START        = 2,
+        SPEED_UP     = 3,
+        SPEED_DOWN   = 4,
+        INCLINE_UP   = 5,
+        INCLINE_DOWN = 6,
+        FAN_UP       = 50,
+        FAN_DOWN     = 51,
+        VOL_UP       = 200,
+        VOL_DOWN     = 201,
+        GRADE_03_NEG = 203,
+        GRADE_02_NEG = 204,
+        GRADE_01_NEG = 205,
+        GRADE_00     = 206,
+        GRADE_01     = 207,
+        GRADE_02     = 208,
+        GRADE_03     = 209,
+        GRADE_04     = 210,
+        GRADE_05     = 211,
+        GRADE_06     = 212,
+        GRADE_08     = 214,
+        GRADE_10     = 216,
+        GRADE_12     = 218,
+        SPEED_01     = 232,
+        SPEED_02     = 233,        
+        SPEED_03     = 234,        
+        SPEED_04     = 235,
+        SPEED_05     = 236,
+        SPEED_06     = 237,
+        SPEED_07     = 238,
+        SPEED_08     = 239,
+        SPEED_09     = 240,
+        SPEED_10     = 241,
+        SPEED_11     = 242,
+        SPEED_12     = 243
     }
 
     public STATUS Status()
@@ -273,7 +276,7 @@ sealed class Board : IDisposable
         return _mode;
     }
 
-    void ChangeBoardStatus(STATUS newStatus)
+    private void ChangeBoardStatus(STATUS newStatus)
     {
         if (_status != newStatus)
         {
@@ -282,81 +285,117 @@ sealed class Board : IDisposable
         }
     }
 
-    void ChangeBeltMode(Board.MODE newMode)
+    private void ChangeWorkoutMode(MODE newMode)
     {
         if (_mode != newMode)
         {
-            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "ChangeBeltMode",  $"Request to change belt mode from '{_mode.ToString()}' to '{newMode.ToString()}'.");
+            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "ChangeWorkoutMode",  $"Request to change workout mode from '{_mode.ToString()}' to '{newMode.ToString()}'.");
+            
             _mode = newMode;
-        }
+            
+            /*
+            switch (_mode)
+            {
+                case MODE.UNKNOWN:         //  0,   //When the app started, indicates some check needs to be done to see the belt status
+                    break;
+                case MODE.IDLE:            //  1,   //Machine waits for user's input
+                    break;
+                case MODE.RUNNING:         //  2,   //Belt is moving
+                    break;
+                case MODE.PAUSE:           //  3,   //Belt is stopped, workout is still running
+                    break;
+                case MODE.RESULTS:         //  4,   //
+                    break;
+                case MODE.DEBUG:           //  5,
+                    break;
+                case MODE.LOG:             //  6,
+                    break;
+                case MODE.MAINTENANCE:     //  7,
+                    break;
+                case MODE.DMK:             //  8,   //SAFETY KEY OUT
+                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, "ChangeWorkoutMode", $"SAFETY KEY WAS REMOVED! ");
 
-    }
-
-    public void DumpHidDevices()
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "DumpHidDevices", $"Searching for HID devices:");
-        foreach (HidDevice dev in DeviceList.Local.GetHidDevices())
-        {
-            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "DumpHidDevices", $"   VendorID: '{dev.VendorID:X4}' (Manufacturer: '{dev.GetManufacturer()}'), ProductID: '{dev.ProductID:X4}'  Product: '{dev.GetProductName()}') on '{dev.DevicePath}'");
+                    break;
+                case MODE.DEMO:            //  9,
+                    break;
+                case MODE.WARM_UP:         // 10,   //Board is going from 0 (actually 1.6km/h) to desired speed in 10 seconds
+                    break;
+                case MODE.COOL_DOWN:       // 11,   //Board is going from actual speed to 0 in 10 secods
+                    break;
+                case MODE.SLEEP:           // 12,
+                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, "ChangeWorkoutMode", $"Waking up board... ");
+                    break;
+                case MODE.RESUME:          // 13,    //Resume belt movement and workout
+                    break;
+                case MODE.LOCKED:          // 14,
+                    break;
+                case MODE.PAUSE_OVERRRIDE: // 15
+                    break;
+            } 
+            */
         }
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "DumpHidDevices", $"Done.");
     }
     
     public void Open()
+    {
+        if (_device == null)
         {
+            if (!_keepTryingSiently)
+                Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", $"Searching for device (VendorID {VID:X4}, ProductID {PID:X4})...");
+            
+            _device = DeviceList.Local.GetHidDevices(VID, PID).FirstOrDefault()!;
             if (_device == null)
             {
                 if (!_keepTryingSiently)
-                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", $"Searching for device (VendorID {VID:X4}, ProductID {PID:X4})...");
-                
-                _device = DeviceList.Local.GetHidDevices(VID, PID).FirstOrDefault()!;
-                if (_device == null)
                 {
-                    if (!_keepTryingSiently)
-                    {
-                        Helper.Log(Helper.LEVELS.ERROR, moduleName, "Open", "   Device not found. Is it plugged in?");
-                        ChangeBoardStatus(Board.STATUS.DISCONNECTED);
-                        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", "      Will keep trying to find the device silently...");
-                    }
-                    
-                    _keepTryingSiently = true;
-                    return;
+                    Helper.Log(Helper.LEVELS.ERROR, moduleName, "Open", "   Device not found. Is it plugged in?");
+                    ChangeBoardStatus(STATUS.DISCONNECTED);
+                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", "      Will keep trying to find the device silently...");
                 }
-            }
-
-            if (_hidStream == null)
-            {
-                if (!_keepTryingSiently)
-                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", "Trying to open Device...");
                 
-                ChangeBoardStatus(Board.STATUS.CONNECTING);
-                _hidStream = _device?.Open()!;
-                if (_hidStream == null)
-                {
-                    if (!_keepTryingSiently){
-                        Helper.Log(Helper.LEVELS.ERROR, moduleName, "Open", "   Device could not be open. Is it opened by another process?");
-                        ChangeBoardStatus(Board.STATUS.DISCONNECTED);
-                        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", "      Will keep trying to open the device silently...");
-                    }
-                        
-                    _keepTryingSiently = true;
-                    return;
-                }
-
-                _hidStream.ReadTimeout = READ_TIMEOUT;
-                _hidStream.WriteTimeout = WRITE_TIMEOUT;
-                _outLen = _device!.GetMaxOutputReportLength(); 
-                _inLen = _device!.GetMaxInputReportLength();  
-                
-                Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", $"   Device (VendorID {VID:X4}, ProductID {PID:X4}, OutcomingReportSize {_outLen}, IncomingReportSize {_inLen}, Path {_device.DevicePath}) open!");
-                ChangeBoardStatus(Board.STATUS.HANDSHAKING);
+                _keepTryingSiently = true;
+                return;
             }
-
-            _keepTryingSiently = false;
-
         }
 
-   public void Dispose()
+        if (_hidStream == null)
+        {
+            if (!_keepTryingSiently)
+                Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", "Trying to open Device...");
+
+            _hidStream = _device?.Open()!;
+            if (_hidStream == null)
+            {
+                if (!_keepTryingSiently){
+                    Helper.Log(Helper.LEVELS.ERROR, moduleName, "Open", "   Device could not be open. Is it opened by another process?");
+                    ChangeBoardStatus(STATUS.DISCONNECTED);
+                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", "      Will keep trying to open the device silently...");
+                }
+                    
+                _keepTryingSiently = true;
+                return;
+            }
+
+            _hidStream.ReadTimeout = READ_TIMEOUT;
+            _hidStream.WriteTimeout = WRITE_TIMEOUT;
+            _outReportSize = _device!.GetMaxOutputReportLength(); 
+            _inReportSize = _device!.GetMaxInputReportLength();  
+            
+            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", $"   Device successfully open:" );
+            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", $"      VendorID: {VID:X4}" );
+            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", $"      ProductID: {PID:X4}" );
+            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", $"      OutcomingReportSize: {_outReportSize}" );
+            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", $"      IncomingReportSize: {_inReportSize}" );
+            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Open", $"      Path: {_device.DevicePath}" );
+            
+            ChangeBoardStatus(STATUS.HANDSHAKING);
+        }
+
+        _keepTryingSiently = false;
+
+    }
+
+    public void Dispose()
     { 
         Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Dispose", "Disposing...");
         
@@ -365,20 +404,21 @@ sealed class Board : IDisposable
 
         try
         {
-            ChangeBoardStatus(Board.STATUS.DISCONNECTING);
+            ChangeBoardStatus(STATUS.DISCONNECTING);
             
             _hidStream.ReadTimeout = 50;
-            var buf = new byte[_inLen];
+            var buf = new byte[_inReportSize];
             for (int i = 0; i < 8; i++)
             {
                 _hidStream.Read(buf, 0, buf.Length);
             }
 
             _hidStream.Close();
+            ChangeBoardStatus(STATUS.DISCONNECTED);
         }
         catch(Exception e)
         {
-            raiseError($"Error while draining unread replies: '{e.Message.ToString()}'!");
+            RaiseError($"Error while draining unread replies: '{e.Message.ToString()}'!");
         }
 
         try
@@ -390,107 +430,98 @@ sealed class Board : IDisposable
             Helper.Log(Helper.LEVELS.ERROR, moduleName, "Dispose", "Error disposing HID stream: " + e.Message.ToString());
         }
 
-        ChangeBoardStatus(Board.STATUS.DISCONNECTED);
+        ChangeBoardStatus(STATUS.DISCONNECTED);
         _hidStream = null!;
 
     }
     
-    //------------------------------------------------------------------------
-    private void raiseError(string msg)
+    public void Handshake()
     {
-        _lastErrorStatus = msg;
-        Helper.Log(Helper.LEVELS.ERROR, moduleName, "raiseError", msg);
-        ChangeBoardStatus(STATUS.ERROR);
-    }
-
-    public string lastErrorMsg()
-    {
-        return _lastErrorStatus;
-    }
-    
-    private string getFormatedFrame(byte[] frame)
-    {   
-        //'02 04 81 87 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF'
-        string sBuffer = BitConverter.ToString(frame).Replace('-', ' ');
-        string sShortBuffer =  sBuffer.Substring(0, (frame[1] * 3)) ;
-        return "[" + (sBuffer.Length >= sShortBuffer.Length ? sShortBuffer + "..." : sBuffer ) + "]";
-    }
-    
-    private string getFrameExplanation(byte[] frame)
-    {   
-        //'02 04 81 87 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF'
-        string sBuffer = BitConverter.ToString(frame).Replace('-', ' ');
-        string sShortBuffer =  sBuffer.Substring(0, (frame[1] * 3)) ;
-        string result = (sBuffer.Length >= sShortBuffer.Length ? sShortBuffer + "..." : sBuffer);
-
-       // reply: [04 07 02 02 00 00 0F]
-       //         │  │  │  │  └──┴─────  ActualKph = 0.00 km/h (belt stopped)
-       //         │  │  │  └──────────── Status
-       //         │  │  └─────────────── ReadWriteData
-       //         │  └────────────────── Length 7
-       //         └───────────────────── Device TREADMILL
-        
-        //string details = "";
-        //for (int i = 0; i < sShortBuffer.Length ; i++)
-        // {
-        //    
-        // }
-
-        return result;
-    }
-
-    private byte checksum(byte[] buffer)
-    {
-        int sum = 0;
-        int len = buffer[1];
-        for (int i = 0; i < len - 1; i++) sum += buffer[i];
-        return (byte) sum;  
-    }
-    
-    private void send(COMMAND command, byte[] buffer)
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "send", $"Sending '{command.ToString()}' command. Frame is '{getFormatedFrame(buffer)}'.");
-        _hidStream.Write(buffer);
-    }
-
-    private byte[] read(COMMAND command)
-    {
-        byte[] fullBuffer = new byte[_inLen];
-        
-        //Since we might be reading trash, or partial answers, we keep trying until we get an answer
-        for (int tries = 0; tries < MAX_READING_RETRIES; tries++)
+        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Handshake", "Starting handshake protocol...");
+        try
         {
-            int bufferSize = _hidStream.Read(fullBuffer, 0, fullBuffer.Length);
-            if (bufferSize > 6) // why 6?
+            SendCommand(COMMAND.DEVICE_INFO);
+            SendCommand(COMMAND.SUPPORTED_DEVICES);
+            SendCommand(COMMAND.SUPPORTED_COMMANDS);
+            SendCommand(COMMAND.SYSTEM_INFO);
+            SendCommand(COMMAND.VERSION_INFO);
+            SendCommand(COMMAND.SERIAL_NUMBER);
+            SendCommand(COMMAND.VERIFY_SECURITY);
+ 
+            ChangeBoardStatus(STATUS.CONNECTED);
+  
+        }              
+        catch (Exception e)
+        {
+            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Handshake", "Error while executing handshake protocol:" + e.Message.ToString());  
+            ChangeBoardStatus(STATUS.DISCONNECTED);
+        }
+    }
+
+    private byte[] ComputeVerifySecurity(uint serialNumber, uint partNumber, uint model, int masterLibraryVersion)
+    {        
+        // Documented fix-up for one production run whose part number doesn't match its own hash.
+        if (partNumber == 370357 && model == 39915) partNumber = 374677;
+
+        static uint RotateLeft(uint v, int bits) => (v << bits) | (v >> (32 - bits));
+        
+        var hash = new byte[32];
+        for (int b = 0; b < 32; b++)
+        {
+            hash[b] = (byte)((b + 1) & 0xFF);
+            if (((serialNumber >> b) & 1) != 0)
             {
-                if (bufferSize <= _inLen)
-                {   
-                    //Keep only the usefull part of the buffer 
-                    byte[] shortBuffer = new byte[bufferSize];
-                    Array.Copy(fullBuffer, shortBuffer, bufferSize);
-                    
-                    //Check if this is the answer we are looking for
-                    if (shortBuffer[2] == (byte) command)
-                    {
-                        //This is our answer!
-                        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "read", $"Received '{command.ToString()}' command. Frame is '{getFormatedFrame(shortBuffer)}'. Status is '{shortBuffer[3]}' ({(shortBuffer[3] == 2 ? "OK" : "FAILED")})!");
-                        return shortBuffer;
-                    }
-                    else
-                    {
-                        Helper.Log(Helper.LEVELS.WARN, moduleName, "read", $"Ignoring response {getFormatedFrame(shortBuffer)}. Command ID Mismatch!");
-                    }
-                } 
-            }    
+                uint p = b < 16 ? RotateLeft(partNumber, 16) >> b : partNumber >> b;
+                hash[b] ^= (byte)(p & 0xFF);
+            }
+            else
+            {
+                hash[b] ^= (byte)((hash[b] * (b + model)) & 0xFF);
+            }
         }
         
-        Helper.Log(Helper.LEVELS.ERROR, moduleName, "read", $"Unable to read a response for '{command.ToString()}' command!");
-        return null!;
+        var payload = new byte[36];
+        Array.Copy(hash, payload, 32);
+        int mlv8 = 8 * masterLibraryVersion;
+        payload[32] = (byte)(mlv8 & 0xFF);
+        payload[33] = (byte)((mlv8 >> 8) & 0xFF);
+        payload[34] = (byte)((mlv8 >> 16) & 0xFF);
+        payload[35] = (byte)((mlv8 >> 24) & 0xFF);
+
+        return payload;
+
     }
 
-    private byte getDeviceID(COMMAND command)
+    private string FormatToHex(byte[] frame, bool showAll = false)
+    {   
+        //'00 02 04 81 87 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF'
+        string sBuffer = BitConverter.ToString(frame).Replace('-', ' ');
+        if (showAll)
+        {
+            return "[" + sBuffer + "]"; 
+        }
+        else
+        {
+            string sShortBuffer =  sBuffer.Substring(0, ((frame[2] + 1) * 3)) ;
+            return "[" + sShortBuffer + "...]";    
+        }
+
+    }
+
+    private byte CheckSum(byte[] buffer, int from, int len)
     {
-        byte deviceID = (byte) DEVICE.NONE;
+        int sum = 0;
+        for (int i = from; i < len; i++)
+        {
+            sum += buffer[i];
+        }
+        
+        return (byte) sum;  
+    }
+
+    private byte GetDeviceId(COMMAND command)
+    {
+        byte deviceId = (byte) DEVICE.NONE;
         
         switch(command)
         {
@@ -498,14 +529,14 @@ sealed class Board : IDisposable
             case COMMAND.VERSION_INFO:
             case COMMAND.SYSTEM_INFO: 
             case COMMAND.SERIAL_NUMBER: 
-                deviceID = (byte) DEVICE.MAIN; //0x00
+                deviceId = (byte) DEVICE.MAIN; //0x00
                 break;
             
             case COMMAND.SUPPORTED_DEVICES: 
             case COMMAND.SUPPORTED_COMMANDS:
             case COMMAND.VERIFY_SECURITY:   
             case COMMAND.READ_WRITE: 
-                deviceID = (byte) DEVICE.TREADMILL; //0x04
+                deviceId = (byte) DEVICE.TREADMILL; //0x04
                 break;
 
             case COMMAND.NONE:                    
@@ -524,312 +555,850 @@ sealed class Board : IDisposable
             case COMMAND.PROTOCOL_DATA:           
             case COMMAND.RAW:                     
                 Helper.Log(Helper.LEVELS.ERROR, moduleName, "createFrame", $"Failed to identify device for command '{command.ToString()}'. Have you tried to list SUPPORTED_DEVICES?");
-                deviceID = (byte) DEVICE.NONE;
+                deviceId = (byte) DEVICE.NONE;
                 break;
         }
 
-        return deviceID;
+        return deviceId;
+    }
+
+    private void RaiseError(string msg)
+    {
+        _lastErrorStatus = msg;
+        Helper.Log(Helper.LEVELS.ERROR, moduleName, "RaiseError", msg);
+        ChangeBoardStatus(STATUS.ERROR);
+        throw new IOException("_lastErrorStatus");
     }
     
-    private byte[] createFrame(COMMAND command, byte[] payload)
+    public string LastErrorMsg()
     {
-        // A Frame is a byte array of up to _outLen bytes (returned after opened the device) where:
-        //    [dev]        Device ID (DEVICES enum)
-        //    [len]        Total lenght of the frame (including [addr, len, cmd and checksum)
-        //    [cmd]        Command (COMMAND enum)
-        //    [payload…]   
-        //    [checksum]   8 bit sum of every preceding byte in the frame
-
-        //Creates the frame 
-        byte[] frame = new Byte[_outLen];
-        
-        //Fill the frame with the "unused bytes" (0xFF)
-        Array.Fill(frame, (byte) 0xFF);
-        
-        //Calculate the len
-        byte len = (byte) (payload.Length + 4);  //+4 because the 4 bytes ([add], [cmd], [len] and [checksum]) also count.
-        if (payload.Length > _outLen - 4)
-        {
-            Helper.Log(Helper.LEVELS.ERROR, moduleName, "createFrame", $"Failed to create a '{command.ToString()}' frame because payload size would result in a frame bigger then {_outLen} bytes (REPORT_SIZE).");
-            return null!;
-        }
-
-        //Add the deviceID
-        frame[0] = getDeviceID(command);
-
-        //Add the Len 
-        frame[1] = len; 
-        
-        //Add the command 
-        frame[2] = (byte) command;
-        
-        //Copy the payload to the frame
-        Array.Copy(payload, 0, frame, 3, payload.Length);
-        
-        //Add checksum (it will check the len on byte 1)
-        frame[len - 1] = checksum(frame); 
-        
-        //Return the frame
-        return frame;
-
+        return _lastErrorStatus;
     }
-    
-    public byte[]  sendCommand(COMMAND command, byte[] payload = null!)
-    {
-        byte[] outFrame = new byte[_outLen];
-        byte[] inFrame = null!;
 
+    private byte[] Mask(IEnumerable<int> regs)
+    {
+        var list = regs.ToList();
+        var mask = new byte[list.Max() / 8 + 1];
+        foreach (var r in list) mask[r / 8] |= (byte)(1 << (r % 8));
+        return mask;
+    }
+
+    public byte[] SendCommand(COMMAND command, REGISTER? register = null, int? newValue = null)
+    {
+        byte[] payload = null!;
+        byte[] answer = null!;
+        _extra_log_info = "";
+        
         switch (command)
         {
             case COMMAND.DEVICE_INFO:
-                //18:47:32.508  TX  DeviceInfo    | 02 04 81 87
-                //18:47:32.519  RX  DeviceInfo  status=0x02 (OK)  payload[24]=54 01 01 00 00 00 00 FF 0F DB FF FB DB FC FB FB 0C E7 1F 00 C0 D5 10 18
+                //[00 02 04 81 87 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+                //[00 04 1D 81 02 54 01 01 00 00 00 00 FF 0F DB FF FB DB FC FB FB 0C E7 1F 00 C0 D5 10 18 79 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]').
+                
+                if (request(command))
+                {   
+                    answer = receive(command);
+                    if (answer != null){
 
-                outFrame = createFrame(command, new byte[0]);
-                send(command, outFrame);
-                inFrame = read(command);
-                if (inFrame[3] == 2)
-                {
-                    //TODO Handle the result
-                    _deviceInfo = inFrame;
+                        _softwareVersion = (answer.Length > 0 ? answer[0] : 0);
+                        Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"   SoftwareVersion: {_softwareVersion}.");   // softwareVersion=84 
                         
-                    _softwareVersion = 0;
-                    _serialNumber = 0;
-                    
-                    return _deviceInfo;
-                }
-                else
-                {
-                    raiseError($"Received an ERROR status after sending command '{command.ToString()}'!");
+                        _serialNumber = (answer.Length > 2 ? BitConverter.ToUInt32(answer, 2) : 0);
+                        Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"   SerialNumber: {_serialNumber}.");         // serialNumber=1 
+                        
+                        // TODO: There's probably more information we can find here....
+                    }    
                 }
                 break;
             
             case COMMAND.SUPPORTED_DEVICES:
-                //18:47:32.519  TX  SupportedDevices    | 04 04 80 88
-                //18:47:32.521  RX  SupportedDevices  status=0x02 (OK)  payload[12]=0B 4C 47 43 4D 4E 4A 40 46 4F 41 42
+                //[00 04 04 80 88 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+                //[00 04 11 80 02 0B 4C 47 43 4D 4E 4A 40 46 4F 41 42 B5 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+               
+                if (request(command))
+                {   
+                    answer = receive(command);
+                    if (answer != null){
+                        // TODO: There's probably more information we can find here....
+                    }    
+                }
                 break;
             
             case COMMAND.SUPPORTED_COMMANDS:
-                //18:47:32.521  TX  SupportedCommands    | 04 04 88 90
-                //18:47:32.523  RX  SupportedCommands  status=0x02 (OK)  payload[8]=09 82 90 83 71 89 84 95
+                //[00 04 04 88 90 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+                //[00 04 0D 88 02 09 82 90 83 71 89 84 95 4C FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+                
+                if (request(command))
+                {   
+                    answer = receive(command);
+                    if (answer != null){
+                        // TODO: There's probably more information we can find here.... 
+                    }    
+                }
                 break;
             
             case COMMAND.SYSTEM_INFO:
-                //18:47:32.523  TX  SystemInfo (2 byte payload)    | 02 06 82 00 00 8A
-                //18:47:32.525  RX  SystemInfo  status=0x02 (OK)  payload[28]=64 00 01 2B 37 00 00 84 D1 06 00 E8 03 2B 7D 00 00 6C DC 02 64 00 00 00 01 02 00 00
-    
-                //TODO:  
-                //_systemInfo = ?
-                //_model = 0;
-                //_partNumber = 0;
+                //[00 02 06 82 00 00 8A FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+                //[00 04 21 82 02 64 00 01 2B 37 00 00 84 D1 06 00 13 00 2B 7D 00 00 6C DC 02 64 00 00 00 01 02 00 00 37 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+                        
+                payload = new byte[] {0, 0};
+                if (request(command, payload))
+                {   
+                    answer = receive(command);
+                    if (answer !=null){
+                        _model = (answer.Length > 3 ? BitConverter.ToUInt32(answer, 3) : 0);       
+                        Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"   Model: {_model}.");                        // Model=14123
+                        
+                        _partNumber = (answer.Length > 7 ? BitConverter.ToUInt32(answer, 7) : 0);  
+                        Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"   PartNumber: {_partNumber}.");              // PartNumber=446852
+                        
+                        // TODO: There's probably more information we can find here.... 
+                    }    
+                }
                 break;
             
             case COMMAND.VERSION_INFO:
-                //18:47:32.525  TX  VersionInfo (2 byte payload)    | 02 06 84 00 00 8C
-                //18:47:32.527  RX  VersionInfo  status=0x02 (OK)  payload[23]=54 50 00 30 2E 31 2E 32 33 34 35 36 37 38 39 2E 30 31 32 33 01 2A 03
-                //TODO:
-                //_versionInfo
-                //_masterLibraryVersion
+                //[00 02 06 84 00 00 8C FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+                //[00 04 1C 84 02 54 50 00 30 2E 31 2E 32 33 34 35 36 37 38 39 2E 30 31 32 33 01 2A 03 D5 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+
+                payload = new byte[] {0, 0};
+                if (request(command, payload))
+                {   
+                    answer = receive(command);
+                    if (answer !=null){
+                        
+                        _masterLibraryVersion = (answer.Length > 0 ? answer[0] : 0);
+                        Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"   MasterLibraryVersion: {_masterLibraryVersion}.");              // MasterLibraryVersion=84 
+                        
+                        // TODO: There's probably more information we can find here.... 
+                    }    
+                }
+
                 break;
             
+            case COMMAND.SERIAL_NUMBER:
+                //[00 02 04 95 9B FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+                //[00 04 18 95 02 12 34 35 30 38 33 36 2D 53 53 38 34 46 33 30 30 33 34 36 B4 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+                
+                if (request(command))
+                {   
+                    answer = receive(command);
+                    if (answer !=null){
+                        // TODO: There's probably more information we can find here.... 
+                    }    
+                }
+                break;
+
             case COMMAND.VERIFY_SECURITY:   
-                //18:47:32.531  TX  VerifySecurity (36 byte payload)    | 04 28 90 07 5A 84 BC EE 26 50 98 C2 02 4C 84 C6 1E 58 B0 FA 2A 94 CC 3E 96 C0 28 92 F2 5C B4 16 6E C8 60 A0 02 00 00 FB
-                //18:47:32.533  RX  VerifySecurity  status=0x02 (OK)  payload[1]=08
+                //[00 04 28 90 07 5A 84 BC EE 26 50 98 C2 02 4C 84 C6 1E 58 B0 FA 2A 94 CC 3E 96 C0 28 92 F2 5C B4 16 6E C8 60 A0 02 00 00 FB FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+                //[00 04 06 90 02 08 A4 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+                if (_softwareVersion > 75)
+                {   
+                    payload = ComputeVerifySecurity(_serialNumber, _partNumber, _model, _masterLibraryVersion);
+                    if (request(command, payload))
+                    {   
+                        //receives the answer
+                        answer = receive(command);
+                        if (answer !=null){
+                            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "SendCommand", $"   Board accepted the challenge (First byte of the payload is the UNLOCK key)." );
+                            ChangeBoardStatus(STATUS.CONNECTED);
+                        }else{
+                            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "SendCommand", $"   Board DID NOT accept the challenge!" );
+                            RaiseError("Board did not accept the challenge!");
+                        Dispose(); 
+                        }    
+                    }
+                }
+                else
+                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, "SendCommand", $"   Board (SoftwareVersion {_softwareVersion}) does not require the challenge!"); 
                 break;   
 
+            case COMMAND.READ_WRITE: 
+                //[00 04 08 02 00 02 00 10 20 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+                //[00 04 06 02 02 01 0F FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+              
+                //Creates the payload
+                var regs = new int[] { (int) register! };
+                var mask = Mask(regs);
+                payload = new byte[2 + mask.Length];
+                payload[0] = 0x00;
+                payload[1] = (byte) mask.Length;
+                mask.CopyTo(payload, 2);
+                
+                _extra_log_info = $" ({register.ToString()})";
+
+                _quietLogging = true;
+                if (request(command, payload))
+                {
+                    //receives the answer
+                    answer = receive(command);
+                    if (answer != null)
+                    {
+                        switch ((REGISTER)register)
+                        {
+                            //case REGISTER.KPH:                      //   0   SpeedConverter           ReadOnly: false     - Target speed, hundredths (160 = 1.60 km/h). The ONLY usable speed value on this board since REG_ACTUAL_KPH returns always 0
+                            //case REGISTER.GRADE:                    //   1   GradeConverter           ReadOnly: false     - Target incline, hundredths (1000 = 10.00 %)
+                            //case REGISTER.RESISTANCE:               //   2   ResistanceConverter      ReadOnly: false  
+                            //case REGISTER.WATTS:                    //   3   ShortConverter           ReadOnly: true   
+                            //case REGISTER.CURRENT_DISTANCE:         //   4   IntConverter             ReadOnly: true      - Advances while the belt turns — the reliable "is it moving" signal
+                            //case REGISTER.RPM:                      //   5   ShortConverter           ReadOnly: true   
+                            //case REGISTER.DISTANCE:                 //   6   IntConverter             ReadOnly: true   
+                           
+                            case REGISTER.KEY_OBJECT:                 //   7   KeyObjConverter          ReadOnly: true      - Physical button press (code, raw code, timestamp, hold time)
+                                var keyCode = (KEYS) (answer.Length > 0 ? answer[0] : 0);
+                                if (keyCode != _lastKeyCode && keyCode != 0)
+                                {
+                                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"A hardware key was pressed: '{keyCode.ToString()}'!");
+                                    switch ((KEYS) keyCode)
+                                    {
+                                        case KEYS.START:
+                                            Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"   Starting belt...");
+                                            _quietLogging = false;
+                                            switch ((MODE) _mode)
+                                            {
+                                                
+                                                Modificar o quietlogging pq ao chamar de maneira recursiva os itens abaixo, nada 'e logado.'
+                                                
+                                                
+                                                case MODE.IDLE: 
+                                                    SendCommand(COMMAND.READ_WRITE, REGISTER.WORKOUT_MODE, (int) MODE.IDLE);
+                                                    SendCommand(COMMAND.READ_WRITE, REGISTER.WORKOUT_MODE, (int) MODE.RUNNING); 
+                                                    SendCommand(COMMAND.READ_WRITE, REGISTER.KPH, (int) _minSpeed); 
+                                                    SendCommand(COMMAND.READ_WRITE, REGISTER.GRADE, (int) 0);
+                                                    break; 
+                                                        
+                                                case MODE.RUNNING:  
+                                                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"   BeltMode is already 'RUNNING!");
+                                                    break;
+                                                
+                                                //case MODE.PAUSE:
+                                                //    SendCommand(COMMAND.READ_WRITE, REGISTER.WORKOUT_MODE, (int) MODE.RUNNING);  
+                                                //    break;
+                                                //
+                                                //case MODE.RESULTS:     
+                                                //case MODE.DEBUG:       
+                                                //case MODE.LOG:         
+                                                //case MODE.MAINTENANCE: 
+                                                
+                                                case MODE.DMK:
+                                                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"   SAFETY KEY IS NOT CONNECTED. INSERT IT AND TRY AGAIN!");
+                                                    break;
+                                                
+                                                //case MODE.DEMO:            
+                                                //case MODE.WARM_UP:            //Board is going from 0 (actually 1.6km/h) to desired speed in 10 seconds
+                                                //case MODE.COOL_DOWN:          //Board is going from actual speed to 0 in 10 secods
+                                                //case MODE.SLEEP:           
+                                                //case MODE.RESUME:              //Resume belt movement and workout
+                                                //case MODE.LOCKED:          
+                                                //case MODE.PAUSE_OVERRRIDE: 
+                                                default:
+                                                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"   NO ACTION FOR THIS BELT MODE ({_mode.ToString()}) IS NOT IMPLEMENTED YET!");
+                                                    break;
+                                            }
+                                            break;
+                                        
+                                        case KEYS.STOP:
+                                            Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"   Stopping belt...");
+                                            _quietLogging = false;
+                                            switch ((MODE) _mode)
+                                            {
+                                                case MODE.IDLE: 
+                                                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"   BeltMode is already 'STOPPED!");
+                                                    break; 
+                                                        
+                                                case MODE.RUNNING:  
+                                                    SendCommand(COMMAND.READ_WRITE, REGISTER.WORKOUT_MODE, (int) MODE.IDLE);
+                                                    break;
+                                                
+                                                //case MODE.PAUSE:
+                                                //    SendCommand(COMMAND.READ_WRITE, REGISTER.WORKOUT_MODE, (int) MODE.RUNNING);  
+                                                //    break;
+                                                //
+                                                //case MODE.RESULTS:     
+                                                //case MODE.DEBUG:       
+                                                //case MODE.LOG:         
+                                                //case MODE.MAINTENANCE: 
+                                                //case MODE.DMK:
+                                                //    Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"   SAFETY KEY IS NOT CONNECTED. INSERT IT AND TRY AGAIN!");
+                                                //    break;
+                                                //
+                                                //case MODE.DEMO:            
+                                                //case MODE.WARM_UP:            //Board is going from 0 (actually 1.6km/h) to desired speed in 10 seconds
+                                                //case MODE.COOL_DOWN:          //Board is going from actual speed to 0 in 10 secods
+                                                //case MODE.SLEEP:           
+                                                //case MODE.RESUME:              //Resume belt movement and workout
+                                                //case MODE.LOCKED:          
+                                                //case MODE.PAUSE_OVERRRIDE: 
+                                                default:
+                                                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"   NO ACTION FOR THIS BELT MODE ({_mode.ToString()}) IS NOT IMPLEMENTED YET!");
+                                                    break;
+                                            }
+                                            break;
+                                            
+                                            break;
+                                        
+                                        case KEYS.GRADE_03_NEG:
+                                        case KEYS.GRADE_02_NEG:
+                                        case KEYS.GRADE_01_NEG:
+                                        case KEYS.GRADE_00:    
+                                        case KEYS.GRADE_01:    
+                                        case KEYS.GRADE_02:    
+                                        case KEYS.GRADE_03:    
+                                        case KEYS.GRADE_04:    
+                                        case KEYS.GRADE_05:    
+                                        case KEYS.GRADE_06:    
+                                        case KEYS.GRADE_08:    
+                                        case KEYS.GRADE_10:    
+                                        case KEYS.GRADE_12: 
+                                            break;
+                                        
+                                        case KEYS.SPEED_01:
+                                        case KEYS.SPEED_02:       
+                                        case KEYS.SPEED_03:       
+                                        case KEYS.SPEED_04:
+                                        case KEYS.SPEED_05:
+                                        case KEYS.SPEED_06:
+                                        case KEYS.SPEED_07:
+                                        case KEYS.SPEED_08:
+                                        case KEYS.SPEED_09:
+                                        case KEYS.SPEED_10:
+                                        case KEYS.SPEED_11:
+                                        case KEYS.SPEED_12:
+                                        default:
+                                            Helper.Log(Helper.LEVELS.DEBUG, moduleName, $"SendCommand", $"   The lower hardware keys (except START and STOP) do not require any action. What about upper keys?");
+                                            break;
+                                    }
+                                }
+                                _lastKeyCode = keyCode;
+                                break;
+                            
+                            //case REGISTER.FAN_SPEED:                //   8   ByteConverter            ReadOnly: false     - Target fan speed
+                            //case REGISTER.VOLUME:                   //   9   ByteConverter            ReadOnly: false     
+                            //case REGISTER.PULSE:                    //  10   PulseConverter           ReadOnly: false     - Heart Rate
+                            //case REGISTER.RUNNING_TIME:             //  11   IntConverter             ReadOnly: true   
+                            
+                            case REGISTER.WORKOUT_MODE: //  12   ModeConverter            ReadOnly: false     - the console state machine, 1 byte
+                                byte currentMode = answer[0];
+                                ChangeWorkoutMode((MODE) currentMode);
+                                break;
+                            
+                            //case REGISTER.CALORIES:                 //  13   CaloriesConverter        ReadOnly: true   
+                            //case REGISTER.AUDIO_SOURCE:             //  14   AudioSourceConverter     ReadOnly: false  
+                            //case REGISTER.LAP_TIME:                 //  15   ShortConverter           ReadOnly: true   
+                            //case REGISTER.ACTUAL_KPH:               //  16   SpeedConverter           ReadOnly: true      - Actual Speed. ⚠️ not implemented on this board — always 0
+                            //case REGISTER.ACTUAL_INCLINE:           //  17   GradeConverter           ReadOnly: true      - Actual incline (signed)
+                            //case REGISTER.ACTUAL_RESISTANCE:        //  18   ResistanceConverter      ReadOnly: true   
+                            //case REGISTER.ACTUAL_DISTANCE:          //  19   IntConverter             ReadOnly: true   
+                            //case REGISTER.CURRENT_TIME:             //  20   IntConverter             ReadOnly: true   
+                            //case REGISTER.CURRENT_CALORIES:         //  21   CaloriesConverter        ReadOnly: true   
+                            //case REGISTER.GOAL_TIME:                //  22   IntConverter             ReadOnly: false  
+                            //case REGISTER.INTERVAL_KPH:             //  23   IntervalDoubleConverter  ReadOnly: true   
+                            //case REGISTER.AGE:                      //  24   ByteConverter            ReadOnly: false  
+                            //case REGISTER.WEIGHT:                   //  25   DoubleConverter          ReadOnly: false  
+                            //case REGISTER.GEAR:                     //  26   GearConverter            ReadOnly: false      
+                            //case REGISTER.MAX_GRADE:                //  27   GradeConverter           ReadOnly: true       - Machine MAX INCLINE
+                            //case REGISTER.MIN_GRADE:                //  28   GradeConverter           ReadOnly: true       - Machine MIN INCLINE
+                            //case REGISTER.TRANS_MAX:                //  29   ShortConverter           ReadOnly: false      
+                            //case REGISTER.MAX_KPH:                  //  30   SpeedConverter           ReadOnly: true       - Machine MAX SPEED
+                            //case REGISTER.MIN_KPH:                  //  31   SpeedConverter           ReadOnly: true       - Machine MIN SPEED
+                            //case REGISTER.IDLE_TIMEOUT:             //  34   ShortConverter           ReadOnly: false      - Seconds of Pause. On this machine it reads 120s (Related to the SLEEP State) 
+                            //case REGISTER.PAUSE_TIMEOUT:            //  35   ShortConverter           ReadOnly: false  
+                            //case REGISTER.SYSTEM_UNITS:             //  36   BoolConverter            ReadOnly: false  
+                            //case REGISTER.GENDER:                   //  37   BoolConverter            ReadOnly: false  
+                            //case REGISTER.FIRST_NAME:               //  38   StringConverter          ReadOnly: false  
+                            //case REGISTER.LAST_NAME:                //  39   StringConverter          ReadOnly: false  
+                            //case REGISTER.USER_NAME:                //  40   StringConverter          ReadOnly: false  
+                            //case REGISTER.HEIGHT:                   //  41   ShortConverter           ReadOnly: false  
+                            //case REGISTER.MAX_RESISTANCE_LEVEL:     //  42   ByteConverter            ReadOnly: true    
+                            //case REGISTER.MAX_WEIGHT:               //  43   DoubleConverter          ReadOnly: true   
+                            //case REGISTER.WARMUP_DISTANCE:          //  44   IntConverter             ReadOnly: true   
+                            //case REGISTER.WARMUP_TIME:              //  45   ShortConverter           ReadOnly: true   
+                            //case REGISTER.WARMUP_TIMEOUT:           //  46   ShortConverter           ReadOnly: false  
+                            //case REGISTER.WARMUP_CALORIES:          //  47   CaloriesConverter        ReadOnly: true   
+                            //case REGISTER.INTERVAL_GRADE:           //  48   DoubleConverter          ReadOnly: true   
+                            //case REGISTER.MAX_PULSE:                //  49   ByteConverter            ReadOnly: true   
+                            //case REGISTER.WT_MAX_KPH:               //  51   SpeedConverter           ReadOnly: true   
+                            //case REGISTER.AVERAGE_GRADE:            //  52   GradeConverter           ReadOnly: true   
+                            //case REGISTER.WT_MAX_GRADE:             //  53   GradeConverter           ReadOnly: true   
+                            //case REGISTER.AVERAGE_WATTS:            //  54   ShortConverter           ReadOnly: true   
+                            //case REGISTER.MAX_WATTS:                //  55   ShortConverter           ReadOnly: true   
+                            //case REGISTER.AVERAGE_RPM:              //  56   ShortConverter           ReadOnly: true   
+                            //case REGISTER.MAX_RPM:                  //  57   ShortConverter           ReadOnly: true   
+                            //case REGISTER.KPH_GOAL:                 //  58   SpeedConverter           ReadOnly: false  
+                            //case REGISTER.GRADE_GOAL:               //  59   GradeConverter           ReadOnly: false  
+                            //case REGISTER.RESISTANCE_GOAL:          //  60   ResistanceConverter      ReadOnly: false  
+                            //case REGISTER.WATT_GOAL:                //  61   ShortConverter           ReadOnly: false  
+                            //case REGISTER.RPM_GOAL:                 //  63   ShortConverter           ReadOnly: false  
+                            //case REGISTER.DISTANCE_GOAL:            //  64   IntConverter             ReadOnly: false  
+                            //case REGISTER.PULSE_GOAL:               //  65   ByteConverter            ReadOnly: false  
+                            //case REGISTER.START_UP_TIME:            //  66   IntConverter             ReadOnly: true   
+                            //case REGISTER.BELT_TOTAL_TIME:          //  67   IntConverter             ReadOnly: true      - Lifetime Machine's Belt total time 
+                            //case REGISTER.BELT_TOTAL_METERS:        //  68   IntConverter             ReadOnly: true      - Lifetime Machine's Belt total distance
+                            //case REGISTER.MOTOR_TOTAL_DISTANCE:     //  69   IntConverter             ReadOnly: true   
+                            //case REGISTER.TOTAL_TIME:               //  70   IntConverter             ReadOnly: true   
+                            //case REGISTER.COOL_DOWN_TIMEOUT:        //  71   ShortConverter           ReadOnly: false  
+                            //case REGISTER.COOL_DOWN_TIME:           //  72   ShortConverter           ReadOnly: true   
+                            //case REGISTER.COOL_DOWN_DISTANCE:       //  73   IntConverter             ReadOnly: true   
+                            //case REGISTER.COOL_DOWN_CALORIES:       //  74   CaloriesConverter        ReadOnly: true   
+                            //case REGISTER.VERTICAL_METER_NET:       //  75   VerticalMeterConverter   ReadOnly: true   
+                            //case REGISTER.VERTICAL_METER_GAIN:      //  76   VerticalMeterConverter   ReadOnly: true   
+                            //case REGISTER.REPS:                     //  77   ShortConverter           ReadOnly: true   
+                            //case REGISTER.LEFT_REPS:                //  78   ShortConverter           ReadOnly: true   
+                            //case REGISTER.RIGHT_REPS:               //  79   ShortConverter           ReadOnly: true   
+                            //case REGISTER.REP_LENGTH:               //  80   ShortConverter           ReadOnly: true   
+                            //case REGISTER.REP_LEFT_LENGTH:          //  81   ShortConverter           ReadOnly: true   
+                            //case REGISTER.REP_RIGHT_LENGTH:         //  82   ShortConverter           ReadOnly: true   
+                            //case REGISTER.BURN_RATE:                //  83   BurnRateConverter        ReadOnly: false  
+                            //case REGISTER.AVG_BURN_RATE:            //  84   BurnRateConverter        ReadOnly: true   
+                            //case REGISTER.MAX_BURN_RATE:            //  85   BurnRateConverter        ReadOnly: true   
+                            //case REGISTER.INTERVAL_RPM:             //  86   IntervalIntConverter     ReadOnly: true   
+                            //case REGISTER.INTERVAL_RESISTANCE:      //  87   IntervalIntConverter     ReadOnly: true   
+                            //case REGISTER.GOAL_CALORIES:            //  94   CaloriesConverter        ReadOnly: false  
+                            //case REGISTER.IDLE_MODE_LOCKOUT:        //  95   BoolConverter            ReadOnly: false    -- Reads 0 on this machine (Related to the SLEEP State) 
+                            //case REGISTER.START_REQUESTED:          //  96   BoolConverter            ReadOnly: true   
+                            //case REGISTER.FAN_STATE:                //  98   FanStateConverter        ReadOnly: false  
+                            //case REGISTER.ACTIVATION_LOCK:          // 100   ByteConverter            ReadOnly: false  
+                            //case REGISTER.PAUSED_TIME:              // 103   IntConverter             ReadOnly: true   
+                            //case REGISTER.SLEEP_TIMER_STATE:        // 107   BoolConverter            ReadOnly: false    -- Not Supported on this machine (Related to the SLEEP State) 
+                            //case REGISTER.REQUIRE_START_REQUESTED:  // 108   BoolConverter            ReadOnly: false  
+                            //case REGISTER.STROKES:                  // 109   ShortConverter           ReadOnly: true   
+                            //case REGISTER.STROKES_PER_MIN:          // 110   ByteConverter            ReadOnly: true   
+                            //case REGISTER.FIVE_HUNDRED_SPLIT:       // 111   ShortConverter           ReadOnly: true   
+                            //case REGISTER.AVG_FIVE_HUNDRED_SPLIT:   // 112   ShortConverter           ReadOnly: true   
+                            //case REGISTER.IS_CLUB_UNIT:             // 115   BoolConverter            ReadOnly: true   
+                            //case REGISTER.IS_READY_TO_DISCONNECT:   // 116   BoolConverter            ReadOnly: true   
+                            //case REGISTER.IS_CONSTANT_WATTS_MODE:   // 119   BoolConverter            ReadOnly: false 
+                            default:
+                                Helper.Log(Helper.LEVELS.ERROR, moduleName, "SendCommand", $"   Unable to send a command '{command.ToString()}' because this register is not implemented yet!");
+                                break;
+                        }
+                    }
+                }
+                _quietLogging = false;
+                break; 
+            
             default:
-                Helper.Log(Helper.LEVELS.DEBUG, moduleName, "sendCommand", $"COMMAND '{command.ToString()}' WAS NOT IMPLEMENTED YET!.");
+                Helper.Log(Helper.LEVELS.ERROR, moduleName, "SendCommand", $"COMMAND '{command.ToString()}' NOT IMPLEMENTED!.");
                 break;
         }
 
         return null!;
     }
-    
-    //-------------------------------------------------------------------------
-    
-    
-    public void Handshake()
+
+    private bool request(COMMAND command, byte[] payload = null!)
     {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Handshake", "Starting handshake protocol...");
+        //-------------------------------------------------------------
+        // REQUEST REPORT FORMAT:
+        //-------------------------------------------------------------
+        //      byte 0:      [REPORT ID]                                        
+        //      byte 1:      [DEVICE ID]  - DEVICE Enum 
+        //      byte 2:      [LENGTH]     - From DEVICE ID to CHECKSUM 
+        //      byte 3:      [COMMAND]    - COMMAND Enum
+        //      byte 4...n:  [PAYLOAD]    - 
+        //      byte n + 1:  [CHECKSUM]   - Starts from byte 1, not 0
+        //-------------------------------------------------------------
+        //[00 02 06 82 00 00 8A FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+        //[00 04 21 82 02 64 00 01 2B 37 00 00 84 D1 06 00 13 00 2B 7D 00 00 6C DC 02 64 00 00 00 01 02 00 00 37 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF]'.
+        //[00 02 06 00 00 FF 07 ...]'
         try
-        {
-            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Handshake", "   1) Asking for DEVICE_INFO...");
-            _deviceInfo = sendCommand(COMMAND.DEVICE_INFO);
+        {   
+            if (payload is null)
+                payload = new byte[0];
+            
+            //Alocate space for the report
+            byte[] report = new byte[_outReportSize];
 
-            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Handshake", "   2) Asking For SUPPORTED_DEVICES...");
-            _supportedDevices = sendCommand(COMMAND.SUPPORTED_DEVICES);
+            //Calculate the len of the frame. Notice that CheckSum starts on byte 1 [DEVICE ID] and not byte 0 [REPORT ID]
+            byte len = (byte) (payload.Length + 4);  
             
-            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Handshake", "   3) Asking for SUPPORTED_COMMANDS...");
-            _suportedComands = sendCommand(COMMAND.SUPPORTED_COMMANDS);
-            
-            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Handshake", "   4) Asking for SYSTEM_INFO...");
-            _systemInfo = sendCommand(COMMAND.SYSTEM_INFO, new byte[] { 0, 0 });
-             
-            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Handshake", "   5) Asking for VERSION_INFO...");
-            _versionInfo = sendCommand(COMMAND.VERSION_INFO, new byte[] { 0, 0 });
-            
-            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Handshake", "   6) Asking for VERIFY_SECURITY...");
-            _securityInfo = sendCommand(COMMAND.DEVICE_INFO);
-            
-            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Handshake", "Handshake accepted successfully."); 
-            ChangeBoardStatus(STATUS.CONNECTED);
-            
-        /*
-        var di = Xfer(Main.Frame(Main.CmdDeviceInfo));
-        var sd = Xfer(Main.Frame(Main.CmdSupportedDevices));
-        var sc = Xfer(Main.Frame(Main.CmdSupportedCommands));
-        var si = Xfer(Main.Frame(Main.CmdSystemInfo, new byte[] { 0, 0 }));
-        var vi = Xfer(Main.Frame(Main.CmdVersionInfo, new byte[] { 0, 0 }));
-        var sn = Xfer(Main.Frame(Main.CmdSerialNumber));
+            //Make sure the payload fits. (If it is larger, truncate it)
+            if (len > _outReportSize)
+            {
+                Helper.Log(Helper.LEVELS.WARN, moduleName, "request", $"Payload was {len} bytes and would not fit on the report!");
+                return false ;
+            }
+   
+            //Fill the frame with the "unused bytes" (0xFF)
+            Array.Fill(report, (byte) 0xFF);
 
-        int softwareVersion = di.Payload.Length > 0 ? di.Payload[0] : 0;                          // DeviceInfo byte 4
-        uint serialNumber = di.Payload.Length >= 6 ? BitConverter.ToUInt32(di.Payload, 2) : 0;    // DeviceInfo uint32 @6
-        uint model = si.Payload.Length >= 7 ? BitConverter.ToUInt32(si.Payload, 3) : 0;           // SystemInfo uint32 @7
-        uint partNumber = si.Payload.Length >= 11 ? BitConverter.ToUInt32(si.Payload, 7) : 0;     // SystemInfo uint32 @11
-        int masterLibraryVersion = vi.Payload.Length > 0 ? vi.Payload[0] : 0;                     // VersionInfo byte 4
-        
-        var payload = Main.ComputeVerifySecurity(serialNumber, partNumber, model, masterLibraryVersion);
-        var vs = Xfer(Main.VerifySecurityFrame(payload));        
-        */
+            //Adds the REPORT_ID
+            report[0] = REPORT_ID;
+
+            //Add the deviceID (MainBoard, Treadmill, etc)
+            report[1] = GetDeviceId(command);
+
+            //Add the Len 
+            report[2] = len; 
+
+            //Add the command 
+            report[3] = (byte) command;
+
+            //Copy the payload to the frame
+            Array.Copy(payload, 0, report, 4, payload.Length);
+
+            //Add CheckSum. Notice that CheckSum starts on byte 1 [DEVICE ID] and not byte 0 [REPORT ID]
+            report[len] = CheckSum(report, 1, len); 
             
-        }              
+            //Logs the whole report
+            if (!_quietLogging )
+                Helper.Log(Helper.LEVELS.DEBUG, moduleName, "request", $"Sending....'{command.ToString()}' command{_extra_log_info}. Report is '{FormatToHex(report)}'."); 
+            
+            //Sends the report
+            _hidStream.Write(report);
+            
+            return true;
+        }
         catch (Exception e)
         {
-            Helper.Log(Helper.LEVELS.DEBUG, moduleName, "Handshake", "Error while executing handshake protocol:" + e.Message.ToString());  
-            ChangeBoardStatus(Board.STATUS.DISCONNECTED);
+            Helper.Log(Helper.LEVELS.ERROR, moduleName, "request", $"Failed to send '{command.ToString()}' command: {e.Message}.");
+            return false;
         }
+    }
+
+    private byte[] receive(COMMAND command)
+    {   
+        //-------------------------------------------------------------
+        // RECEIVED REPORT FORMAT:
+        //-------------------------------------------------------------
+        //      byte 0:      REPORT ID (usually 0)                                      
+        //      byte 1:      DEVICE ID (DEVICE Enum) 
+        //      byte 2:      LENGTH (from byte 1 to byte n + 1)
+        //      byte 3:      COMMAND (COMMAND Enum)
+        //      byte 4:      STATUS
+        //      byte 5...n:  PAYLOAD
+        //      byte n + 1:  CHECKSUM
+        //-------------------------------------------------------------
+
+        try
+        { 
+            byte[] payload = null!;
+            int reportSize = 0;
+            
+            //Alocate space for the report
+            byte[] report = new byte[_inReportSize];
+            
+            //Keeps reading data until there's nothing to read or we received the command answer
+            do
+            {
+                //Reads the report from the HID stream
+                reportSize = _hidStream.Read(report, 0, report.Length);
+
+                //Validates the result
+                if (reportSize <= _inReportSize)
+                {
+                    //Is this the answer we were waiting for?
+                    var cmd = (COMMAND) report[3];
+                    if (cmd == command)
+                    {   
+                        //Is the length correct?
+                        int len = report[2];
+                        if (len > 5 && len < report.Length)
+                        {   
+                            byte calculatedCheckSum = CheckSum(report, 1, len);
+                            if (calculatedCheckSum == report[len])
+                            {   
+                                //Check if the STATUS is OK
+                                byte status = report[4];
+                                if (status == STATUS_OK)
+                                {
+                                    if (!_quietLogging )
+                                        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "receive", $"Received...'{command.ToString()}' command{_extra_log_info}. Report is '{FormatToHex(report)}'.");
+                                    
+                                    //Extrai o payload
+                                    payload = new byte[len - 4];
+                                    Array.Copy(report, 5, payload, 0, len - 4);
+                                    
+                                    //Retorna o payload apenas
+                                    return payload;
+                                }
+
+                                if (status == STATUS_LOCKED) //TODO:  When is this supposed to happen? How to test it?
+                                {
+                                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, "receive", $"Received...'{command.ToString()}' command. Status is LOCKED for report '{FormatToHex(report)}'. Trying to answer challenge again.");
+                                    SendCommand(COMMAND.VERIFY_SECURITY);
+                                    return null!;
+                                }
+
+                                Helper.Log(Helper.LEVELS.WARN, moduleName, "receive", $"Ignoring response for '{command.ToString()}' command. Status is NOT OK ({status}) for report '{FormatToHex(report)}'!");
+
+                            }
+                            else
+                                Helper.Log(Helper.LEVELS.WARN, moduleName, "receive", $"Ignoring response for '{command.ToString()}' command. CheckSum ({calculatedCheckSum} != {report[len]}) mismatch for report '{FormatToHex(report)}'!"); 
+                        }
+                        else
+                            Helper.Log(Helper.LEVELS.WARN, moduleName, "receive", $"Ignoring response for '{command.ToString()}' command. ReportLen ({len}) mismatch for report '{FormatToHex(report)}'!"); 
+                    }
+                    else
+                        Helper.Log(Helper.LEVELS.WARN, moduleName, "receive", $"Ignoring response for '{command.ToString()}' command. CommandID ({cmd.ToString()}) mismatch for report '{FormatToHex(report)}'!");
+                }
+                else
+                    Helper.Log(Helper.LEVELS.WARN, moduleName, "receive", $"Ignoring response for '{command.ToString()}' command. ReportSize ({reportSize}) mismatch for report '{FormatToHex(report)}'!");
+
+            } while (reportSize > 0); 
+
+        }
+        catch (Exception e)
+        {
+            Helper.Log(Helper.LEVELS.ERROR, moduleName, "receive", $"Failed to read response for '{command.ToString()}' command: {e.Message}.");
+        }
+        
+        return null!;
+    }
+
+    public void ReadAllRegisters()
+    {
+        //READ CURRENT WORKOUT MODE
+        SendCommand(COMMAND.READ_WRITE, REGISTER.WORKOUT_MODE);
+        
+        //READ PHISICAL BUTTONS-----------------------------------------------------------------------------------------
+        SendCommand(COMMAND.READ_WRITE, REGISTER.KEY_OBJECT);
+        
+        //WAKEUP BOARD--------------------------------------------------------------------------------------------------
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.WORKOUT_MODE, (int) MODE.IDLE);
+
+        //PRIMING------------------------------------------------------------------------------------------------------- 
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.IDLE_MODE_LOCKOUT, 0);    
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.REQUIRE_START_REQUESTED, 1);
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.START_REQUESTED, 1);
+
+        //SET USER INFO-------------------------------------------------------------------------------------------------
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.AGE, 50);     // in years
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.WEIGHT, 110); // in kg
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.HEIGHT, 180); // in cm
+        
+        //BOARD LIMITES-------------------------------------------------------------------------------------------------
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.MAX_KPH);    // Max Speed 
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.MIN_KPH);    // Min Speed
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.MAX_GRADE);  // Max Incline
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.MIN_GRADE);  // Min Incline
+        
+        //CURRENT VALUES------------------------------------------------------------------------------------------------
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.DISTANCE);            // Set Distance goal (?)
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.DISTANCE_GOAL);       // Distance goal (?)
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.ACTUAL_DISTANCE);     // Current Distance (?)
+        //
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.KPH);                 // Set Speed goal (?)
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.KPH_GOAL);            // Speed goal (?) 
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.ACTUAL_KPH);          // Current Speed (?)
+        //
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.GRADE);               // Set Incline goal (?)
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.GRADE_GOAL);          // Incline goal (?) 
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.ACTUAL_INCLINE);      // Current Incline (?)
+        //
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.RESISTANCE);          // Set Resistance goal (?)
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.RESISTANCE_GOAL);     // Resistance goal (?)
+        //
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.ACTUAL_RESISTANCE);   // Current Resistence (?)
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.CALORIES);            // Set Calories goal (?)
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.GOAL_CALORIES);       // Calories goal (?)
+
+        //CHECK IF THE BELT IS MOVING-----------------------------------------------------------------------------------
+        // TODO: The safest method to check if the belt is moving is measure distance twice (with a delay) and calculate
+        //       the difference of both distances.
+        //SendCommand(COMMAND.READ_WRITE, REGISTER.CURRENT_DISTANCE);
+
     }
     
     //-------------------------------------------------------------------------
-    // Functions not implemented:
+/*
+    private string dumpBuffer(byte[] frame)
+    {   
+        //'02 04 81 87 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF'
+        string sBuffer = BitConverter.ToString(frame).Replace('-', ' ');
 
-    public  byte[] ComputeVerifySecurity(uint serialNumber, uint partNumber, uint model, int masterLibraryVersion)
-    {        
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "ComputeVerifySecurity", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
-        var payload = new byte[36];
-        /*
-        // Documented fix-up for one production run whose part number doesn't match its own hash.
-        if (partNumber == 370357 && model == 39915) partNumber = 374677;
+        return "[" + sBuffer + "]"; 
 
-        var hash = new byte[32];
-        for (int b = 0; b < 32; b++)
-        {
-            hash[b] = (byte)((b + 1) & 0xFF);
-            if (((serialNumber >> b) & 1) != 0)
-            {
-                uint p = b < 16
-                    ? RotateLeft(partNumber, 16) >> b     // >>> in the source = unsigned shift, which C#'s uint >> already is
-                    : partNumber >> b;
-                hash[b] ^= (byte)(p & 0xFF);
-            }
-            else
-            {
-                hash[b] ^= (byte)((hash[b] * (b + model)) & 0xFF);
-            }
+    }
+    private string getFormatedBuffer(byte[] frame)
+        {   
+            string sBuffer = BitConverter.ToString(frame).Replace('-', ' ');
+            return "[" + sBuffer + "]"; 
         }
+    private void dumpPaylad(){}
+    private void dumpReport(){}
+    private void dumpFrame(){}
+    private long readBytesAsInteger(byte[] buf)
+    {
+        long v = 0;    
+        for (int i = Math.Min(buf.Length, 8) - 1; i >= 0; i--)
+        {
+            v = (v << 8) | buf[i];
+        }
+        return v;
+    }
+    private string GetFrameExplanation(byte[] frame)
+    {   
+        //'02 04 81 87 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF'
+        string sBuffer = BitConverter.ToString(frame).Replace('-', ' ');
+        string sShortBuffer =  sBuffer.Substring(0, (frame[1] * 3)) ;
+        string result = (sBuffer.Length >= sShortBuffer.Length ? sShortBuffer + "..." : sBuffer);
 
-        var payload = new byte[36];
-        Array.Copy(hash, payload, 32);
-        int mlv8 = 8 * masterLibraryVersion;
-        payload[32] = (byte)(mlv8 & 0xFF);
-        payload[33] = (byte)((mlv8 >> 8) & 0xFF);
-        payload[34] = (byte)((mlv8 >> 16) & 0xFF);
-        payload[35] = (byte)((mlv8 >> 24) & 0xFF);
+        // reply: [04 07 02 02 00 00 0F]
+        //         │  │  │  │  └──┴─────  ActualKph = 0.00 km/h (belt stopped)
+        //         │  │  │  └──────────── Status
+        //         │  │  └─────────────── ReadWriteData
+        //         │  └────────────────── Length 7
+        //         └───────────────────── Device TREADMILL
         
-                */
-        return payload;
+        //string details = "";
+        //for (int i = 0; i < sShortBuffer.Length ; i++)
+        // {
+        //    
+        // }
 
+        return result;
     }
-
-    private void readRegister(REGISTER register)
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "readRegister", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
-        //    Read — note the leading zero:
-        //    [0x00] [maskLen] [mask bytes, LSB-first]
-    }
-    
-    private void writeRegister(REGISTER register, byte newValue)
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "writeRegister", "PROCEDURE WAS NOT IMPLEMENTED YET!");
+    private void WriteRegister(REGISTER register, byte newValue)
+    {       //Write payload = [maskLen][mask bytes][values, ascending register order, little-endian].
+            // No leading op byte (that leading 0x00 is what marks a read).
+            // ONE REGISTER PER FRAME unless the registers have identical widths (e.g. Kph + Grade),
+            // otherwise the board silently discards the frame.
+        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "WriteRegister", "PROCEDURE WAS NOT IMPLEMENTED YET!");
         //TODO
         //    Write — no leading byte at all:
         //    [maskLen] [mask bytes, LSB-first] [values…]
     }
-    
-    private void SpeedConverter()
+    private long ReadIntegerValue(byte[] b)
     {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "SpeedConverter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
+        long v = 0;
+        for (int i = Math.Min(b.Length, 8) - 1; i >= 0; i--) v = (v << 8) | b[i];
+        return v;
     }
-    private void GradeConveter()     {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "GradeConveter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
-    }
-    private void ShortConverter()    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "ShortConverter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
-    }
-    private void IntConverter()    
+    private void SendReport(byte[] buffer)
     {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "IntConverter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
+        var command = (COMMAND) buffer[OUT_REPORT_COMMAND_BYTE_POS];  
+        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "SendReport", $"Sending....'{command.ToString()}' command. Report is '{FormatToHex(buffer, false)}'."); 
+        
+        _hidStream.Write(buffer);
     }
-    private void KeyObjConverter()     
+    private byte[] CreateReport(COMMAND command, byte[] payload)
     {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "KeyObjConverter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
+        //----------------------------------------------------------------
+        // An outReport is a byte array of (_outReportSize + 1) bytes, where:
+        //     Byte 0      = ReportID 
+        //     Byte 1...n  = outFrame 
+        // An outFrame is byte array of up to _outReportSize bytes, where:
+        //     Byte 0     = [DeviceID] - DEVICES enum
+        //     Byte 1     = [Length]   - Length of the frame including [DeviceID], [Length], [Command], [Payload] and [Checksum]
+        //     Byte 2     = [Command]  - COMMAND enum
+        //     Byte 3...n = [Payload]  - varies depending of the Command  
+        //     Byte n-1   = [Checksum] - 8 bit sum of every preceding byte in the frame
+        //----------------------------------------------------------------
+
+       //Calculate the len of the frame)
+       byte len = (byte) (payload.Length + 4);  
+
+       //Creates the frame 
+       byte[] frame = new Byte[FRAME_SIZE];
+       
+       //Fill the frame with the "unused bytes" (0xFF)
+       Array.Fill(frame, (byte) 0xFF);
+
+       //Add the deviceID
+       frame[0] = GetDeviceId(command);
+
+       //Add the Len 
+       frame[1] = len; 
+       
+       //Add the command 
+       frame[2] = (byte) command;
+       
+       //Copy the payload to the frame
+       Array.Copy(payload, 0, frame, 3, (payload.Length + 4 > FRAME_SIZE ? FRAME_SIZE - 4 : payload.Length));
+
+       //Add CheckSum (it will check the len on byte 1)
+       frame[len - 1] = CheckSum(frame); 
+       
+       //Create a report
+       byte[] report = new byte[_outReportSize]; 
+       
+       //Fills the REPORT_ID
+       report[0] = (byte) REPORT_ID;
+       
+       //Copies the frame to the report
+       Array.Copy(frame, 0, report, 1, FRAME_SIZE);
+        
+       //Return the report
+       return report;
     }
-    private void ByteConverter()    
+    private byte[] ReadReport(COMMAND command)
     {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "ByteConverter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
+        //----------------------------------------------------------------
+        // An inReport is a byte array of (_inReportSize + 1) bytes, where:
+        //     Byte 0      = [ReportID] 
+        //     Byte 1...n  = [inFrame] 
+        // A inFrame is byte array of up to _inReportSize bytes, where:
+        //     Byte 0     = [DeviceID] - DEVICES enum
+        //     Byte 1     = [Length]   - Length of the frame including [DeviceID], [Length], [Command], [Status], [Payload] and [Checksum]
+        //     Byte 2     = [Command]  - COMMAND enum
+        //     Byte 3     = [Status]   - Status of the command ((2=OK, anything else=FAILED)
+        //     Byte 4...n = [Payload]
+        //     Byte n-1   = [Checksum]
+        //----------------------------------------------------------------
+
+        byte[] buffer = new byte[_inReportSize];
+        int bufferSize = 0;
+        
+        do
+        {
+            //Reads the report from the HID stream
+            bufferSize = _hidStream.Read(buffer, 0, buffer.Length);
+            
+            //Validates the result
+            if (bufferSize <= _inReportSize)
+            {
+                //Is this the answer we were waiting for?
+                var cmd = (COMMAND) buffer[IN_REPORT_COMMAND_BYTE_POS];
+                if (cmd == command)
+                {   
+                    //Is the length correct?
+                    int len = buffer[IN_REPORT_LEN_BYTE_POS];
+                    if (len > 5 && len < buffer.Length)
+                    {
+                        //Keep only the usefull part of the buffer 
+                        byte[] inFrame = new byte[len];
+                        Array.Copy(buffer, 1, inFrame, 0, len);
+             
+                        byte calculatedCheckSum = CheckSum(inFrame);
+                        if (calculatedCheckSum == buffer[len])
+                        {   
+                            //Check if the STATUS is OK
+                            byte status = buffer[IN_REPORT_STATUS_BYTE_POS];
+                            if (status == STATUS_OK)
+                            {
+                                Helper.Log(Helper.LEVELS.DEBUG, moduleName, "ReadReport", $"Received...'{command.ToString()}' command. Status is OK for Report is '{FormatToHex(buffer, false)}'.");
+                                return inFrame;
+                            }
+                            else
+                            {   
+                                //TODO:  When is this supposed to happen? How to test it?
+                                if (status == STATUS_LOCKED)
+                                {
+                                    Helper.Log(Helper.LEVELS.DEBUG, moduleName, "ReadReport", $"Received...'{command.ToString()}' command. Status is LOCKED for Report is '{FormatToHex(buffer)}'.");
+                                    SendCommand(COMMAND.VERIFY_SECURITY);
+                                    return null!;
+                                }
+                                else
+                                    Helper.Log(Helper.LEVELS.WARN, moduleName, "ReadReport", $"Ignoring response for '{command.ToString()}' command. Status is NOT OK ({status}) for Report '{FormatToHex(buffer)}'!");
+                            }
+                        }
+                        else
+                            Helper.Log(Helper.LEVELS.WARN, moduleName, "ReadReport", $"Ignoring response for '{command.ToString()}' command. CheckSum ({calculatedCheckSum} != {buffer[len - 1]}) mismatch for Report '{FormatToHex(buffer)}'!"); 
+                    }
+                    else
+                        Helper.Log(Helper.LEVELS.WARN, moduleName, "ReadReport", $"Ignoring response for '{command.ToString()}' command. ReportLen ({len}) mismatch for Report '{FormatToHex(buffer)}'!"); 
+                }
+                else
+                    Helper.Log(Helper.LEVELS.WARN, moduleName, "ReadReport", $"Ignoring response for '{command.ToString()}' command. CommandID ({cmd.ToString()}) mismatch for Report '{FormatToHex(buffer)}'!");
+            }
+            else
+                Helper.Log(Helper.LEVELS.WARN, moduleName, "ReadReport", $"Ignoring response for '{command.ToString()}' command. ReportSize ({bufferSize})  mismatch for Report '{FormatToHex(buffer)}'!");
+
+        } while (bufferSize > 0);
+
+        Helper.Log(Helper.LEVELS.ERROR, moduleName, "read", $"Unable to read a response for '{command.ToString()}' command!");
+        return null!;
     }
-    private void PulseConverter()    
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "PulseConverter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
-    }
-    private void ModeConverter()     
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "ModeConverter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
-    }
-    private void CaloriesConverter()     
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "CaloriesConverter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
-    }
-    private void AudioSourceConverter()    
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "AudioSourceConverter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
-    }
-    private void IntervalDoubleConverter()    
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "IntervalDoubleConverter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
-    }
-    private void BoolConverter()     
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "BoolConverter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
-    }
-    private void VerticalMeterConverter()    
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "VerticalMeterConverter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
-    }
-    private void BurnRateConverter()    
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "BurnRateConverter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
-    }
-    private void FanStateConverter()    
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "FanStateConverter", "PROCEDURE WAS NOT IMPLEMENTED YET!");
-        //TODO
-    }
+*/
     
 }
