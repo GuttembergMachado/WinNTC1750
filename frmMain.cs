@@ -50,12 +50,12 @@ sealed partial class frmMain : Form
     
     private void btnStart_Click(object sender, EventArgs e)
     {
-        StartBelt(true);
+        board.StartBelt(true);
     }
 
     private void btnStop_Click(object sender, EventArgs e)
     {
-        StopBelt(true);
+        board.StopBelt(true);
     }
 
     void UpdateScreen()
@@ -89,17 +89,7 @@ sealed partial class frmMain : Form
         
     }
 
-    void StartBelt(Boolean warmUp = false)
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "StartBelt", "Stopping belt. " + (warmUp ? " Warming up first..." : "..."));     
-        //TODO
-    }
 
-    void StopBelt(Boolean coolDown = false) 
-    {
-        Helper.Log(Helper.LEVELS.DEBUG, moduleName, "StopBelt", "Stopping belt. " + (coolDown ? " Cooling down first..." : "..."));
-        //TODO
-    }
 
     void WorkerThreadProc()
     {
